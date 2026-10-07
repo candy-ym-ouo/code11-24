@@ -6,9 +6,10 @@ import { logger } from '../logger';
 import { processImage } from '../media/image';
 import { processAudio } from '../media/audio';
 import { inspectDocument } from '../media/document';
-import { putBuffer, remove } from '../storage/local';
+import { putBuffer } from '../storage/local';
 import { makeTmpPath } from '../services/mediaService';
 import { buildExportZip } from '../services/exportService';
+import { collectMediaKeys, loadReferencedKeys, removeUnreferencedKeys } from '../services/storageRefs';
 
 type Handler = (job: Job) => Promise<Record<string, unknown>>;
 
@@ -97,25 +98,30 @@ async function handleTrashPurge(): Promise<Record<string, unknown>> {
     include: { media: true },
     take: 500,
   });
-  let removed = 0;
+  let removedItems = 0;
+  // 先收集本批条目持有的全部 key，再统一删库：内容寻址下同一文件可能被多条记录引用，
+  // 只有删库后全库重算引用，才能判断哪些 key 真的可以回收。
+  const candidateKeys = new Set<string>();
   for (const item of expired) {
-    const keys = item.media.flatMap((m) => [m.storageKey, m.thumbKey, m.largeKey, m.transcodeKey, m.waveformKey]);
-    await prisma.item.delete({ where: { id: item.id } });
-    await Promise.all(keys.filter(Boolean).map((k) => remove(k!).catch(() => undefined)));
-    removed += 1;
+    collectMediaKeys(item.media, candidateKeys);
+    try {
+      await prisma.item.delete({ where: { id: item.id } });
+      removedItems += 1;
+    } catch (err) {
+      // 单条失败（例如已被并发删除）不连累整批，对应文件因仍可能被引用而保守保留
+      logger.error({ itemId: item.id, err: err instanceof Error ? err.message : String(err) }, '回收站清理失败，跳过该条目');
+    }
   }
-  return { removed, cutoff: cutoff.toISOString() };
+  const removedKeys = await removeUnreferencedKeys(prisma, [...candidateKeys]);
+  return { removed: removedItems, removedFiles: removedKeys.length, cutoff: cutoff.toISOString() };
 }
 
 /** 清理孤儿文件与过期导出包，防止磁盘只涨不降。 */
 async function handleStorageGc(): Promise<Record<string, unknown>> {
   const fsp = await import('node:fs/promises');
   const path = await import('node:path');
-  const referenced = new Set<string>();
-  const media = await prisma.itemMedia.findMany({ select: { storageKey: true, thumbKey: true, largeKey: true, transcodeKey: true, waveformKey: true } });
-  for (const m of media) {
-    for (const k of [m.storageKey, m.thumbKey, m.largeKey, m.transcodeKey, m.waveformKey]) if (k) referenced.add(k);
-  }
+  // 引用集合与 trash_purge 走同一套重算逻辑（含软删除记录，回收站条目仍保留文件）
+  const referenced = await loadReferencedKeys(prisma);
 
   const root = config.STORAGE_ROOT;
   let scanned = 0;

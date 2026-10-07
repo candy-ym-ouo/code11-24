@@ -177,6 +177,38 @@ if [ "$HAS_THUMB" = "true" ]; then ok "缩略图可直接访问"; else bad "缺�
 code=$(curl -sS -o "$WORK/thumb.webp" -w '%{http_code}' -b "$JAR_A" -H "Authorization: Bearer $TOKEN_A" "$API/api/v1/families/$FID/media/$MID_IMG/thumb")
 expect "$code" 200 "缩略图下载成功"
 
+# 回归：同一份文件上传到两个条目（内容寻址共享一份盘），彻底删除其中一个条目后，
+# 另一条目的原始文件与缩略图必须仍可访问；同一条目内重复上传的另一条记录也不受连累。
+STORAGE_ROOT="${STORAGE_ROOT:-$(dirname "$0")/../data/uploads}"
+code=$(req POST "$V1/families/$FID/items" "$JAR_A" '{"title":"重复图片的另一个条目","category":"other","acquiredPrecision":"unknown","placeText":"老家"}' "$TOKEN_A")
+expect "$code" 201 "为去重回归创建第二个条目"
+IID_DUP=$(json 'd.item.id' < "$WORK/body")
+code=$(req_file "$V1/families/$FID/items/$IID_DUP/media" "$JAR_A" "$TOKEN_A" "$WORK/photo.png" image)
+expect "$code" 202 "向第二个条目上传同一份照片（命中去重）"
+MID_DUP2=$(json 'd.media.id' < "$WORK/body")
+
+for _ in $(seq 1 40); do
+  sleep 1
+  code=$(req GET "$V1/families/$FID/items/$IID_DUP" "$JAR_A" "" "$TOKEN_A")
+  STATUS_DUP=$(json 'd.item.media.find(m=>m.id==="'"$MID_DUP2"'")?.status' < "$WORK/body")
+  [ "$STATUS_DUP" = "ready" ] && break
+done
+if [ "$STATUS_DUP" = "ready" ]; then ok "第二条目的重复图片处理完成"; else bad "重复图片处理未完成，状态：$STATUS_DUP"; fi
+
+# 彻底删除路径默认对新文件有 24h 宽限（防并发上传误删），回归时把这户的存储文件老化
+touch -d '2 days ago' "$STORAGE_ROOT/families/$FID/objects" "$STORAGE_ROOT/families/$FID/derived" 2>/dev/null || true
+find "$STORAGE_ROOT/families/$FID" -type f -exec touch -d '2 days ago' {} + 2>/dev/null || true
+
+code=$(req POST "$V1/families/$FID/items/$IID_DUP/trash" "$JAR_A" "" "$TOKEN_A"); expect "$code" 200 "第二个条目移入回收站"
+code=$(req DELETE "$V1/families/$FID/items/$IID_DUP/purge" "$JAR_A" "" "$TOKEN_A"); expect "$code" 204 "彻底删除第二个条目"
+
+code=$(curl -sS -o /dev/null -w '%{http_code}' -b "$JAR_A" -H "Authorization: Bearer $TOKEN_A" "$API/api/v1/families/$FID/media/$MID_IMG/raw")
+expect "$code" 200 "删除共享文件的一条记录后，另一条目的原始文件仍可查看"
+code=$(curl -sS -o /dev/null -w '%{http_code}' -b "$JAR_A" -H "Authorization: Bearer $TOKEN_A" "$API/api/v1/families/$FID/media/$MID_IMG/thumb")
+expect "$code" 200 "删除共享文件的一条记录后，另一条目的缩略图仍可查看"
+code=$(curl -sS -o /dev/null -w '%{http_code}' -b "$JAR_A" -H "Authorization: Bearer $TOKEN_A" "$API/api/v1/families/$FID/media/$MID_DUP/raw")
+expect "$code" 200 "同一条目里重复上传的另一条记录也不受连累"
+
 code=$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN_A" -H 'Range: bytes=0-99' "$API/api/v1/families/$FID/media/$MID_AUD/raw")
 expect "$code" 206 "音频原始文件支持 Range 请求（可拖动播放）"
 

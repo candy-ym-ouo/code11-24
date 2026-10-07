@@ -425,7 +425,12 @@ export async function changeStatus(
   return toItemDto(updated, ctx.familyId);
 }
 
-/** 彻底删除：先删库，再清理磁盘文件；审计保留（合规与追溯需要）。 */
+/**
+ * 彻底删除：先删库，再由调用方按全局引用情况回收磁盘文件；审计保留（合规与追溯需要）。
+ *
+ * 注意：返回的只是「候选 key」，不能直接删。内容寻址下同 sha256 的文件可能
+ * 还被其他媒体记录（甚至其他条目）引用，必须经 storageRefs 重算引用后再删。
+ */
 export async function purgeItem(userId: string, ctx: FamilyContext, itemId: string, meta: ActorMeta) {
   const item = await prisma.item.findFirst({ where: { id: itemId, familyId: ctx.familyId } });
   if (!item) throw notFound('条目不存在');
@@ -447,7 +452,9 @@ export async function purgeItem(userId: string, ctx: FamilyContext, itemId: stri
       tx,
     );
   });
-  return media.flatMap((m) => [m.storageKey, m.thumbKey, m.largeKey, m.transcodeKey, m.waveformKey].filter(Boolean) as string[]);
+  return {
+    candidateKeys: media.flatMap((m) => [m.storageKey, m.thumbKey, m.largeKey, m.transcodeKey, m.waveformKey].filter(Boolean) as string[]),
+  };
 }
 
 export async function listTrash(ctx: FamilyContext, limit = 100) {

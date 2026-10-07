@@ -6,7 +6,7 @@ import type { ItemMedia } from '@prisma/client';
 import { prisma } from '../db';
 import { AppError, badRequest, notFound, conflict } from '../http/errors';
 import { config } from '../config';
-import { objectKey, exists, moveIntoPlace, remove, statObject, tmpDir } from '../storage/local';
+import { objectKey, exists, moveIntoPlace, statObject, tmpDir } from '../storage/local';
 import { detectFileType, limitForKind } from '../media/sniff';
 import { toMediaDto } from '../serializers';
 import * as audit from './auditService';
@@ -225,9 +225,9 @@ export function makeTmpPath(ext: string): string {
   return path.join(tmpDir(), `proc-${Date.now()}-${Math.random().toString(36).slice(2, 10)}${ext}`);
 }
 
-export async function removeStoredKeys(keys: string[]): Promise<void> {
-  await Promise.all(keys.map((k) => remove(k).catch(() => undefined)));
-}
+// 注意：这里刻意不提供「按 key 直接删文件」的工具。存储是内容寻址、跨记录共享的，
+// 删除媒体记录后的磁盘回收必须走 services/storageRefs 的全库引用重算，
+// 否则同 sha256 的其他条目会被连累得看不了文件。
 
 export async function assertMediaBelongsToFamily(mediaId: string, familyId: string): Promise<ItemMedia> {
   const media = await prisma.itemMedia.findFirst({ where: { id: mediaId, item: { familyId } } });

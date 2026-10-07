@@ -18,7 +18,8 @@ import * as itemService from '../services/itemService';
 import * as noteService from '../services/noteService';
 import * as mediaService from '../services/mediaService';
 import { listTrash } from '../services/itemService';
-import { removeStoredKeys } from '../services/mediaService';
+import { prisma } from '../db';
+import { removeUnreferencedKeys } from '../services/storageRefs';
 
 export const itemsRouter = Router({ mergeParams: true });
 
@@ -101,8 +102,9 @@ itemsRouter.delete(
   asyncHandler(async (req, res) => {
     const user = currentUser(req);
     const ctx = familyCtx(req);
-    const keys = await itemService.purgeItem(user.id, ctx, req.params.itemId!, clientMeta(req));
-    await removeStoredKeys(keys);
+    const { candidateKeys } = await itemService.purgeItem(user.id, ctx, req.params.itemId!, clientMeta(req));
+    // 删库后重算引用：同 sha256 的文件若仍被其他媒体记录引用则保留，24h 宽限防并发上传
+    await removeUnreferencedKeys(prisma, candidateKeys);
     res.status(204).end();
   }),
 );

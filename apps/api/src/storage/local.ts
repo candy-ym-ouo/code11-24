@@ -76,10 +76,10 @@ export function readStream(key: string, range?: { start: number; end: number }):
   return createReadStream(absOf(key), range);
 }
 
-export async function statObject(key: string): Promise<{ size: number } | null> {
+export async function statObject(key: string): Promise<{ size: number; mtimeMs: number } | null> {
   try {
     const st = await fsp.stat(absOf(key));
-    return { size: st.size };
+    return { size: st.size, mtimeMs: st.mtimeMs };
   } catch {
     return null;
   }
