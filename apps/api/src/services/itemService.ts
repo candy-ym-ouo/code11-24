@@ -425,14 +425,19 @@ export async function changeStatus(
   return toItemDto(updated, ctx.familyId);
 }
 
-/** 彻底删除：先删库，再清理磁盘文件；审计保留（合规与追溯需要）。 */
-export async function purgeItem(userId: string, ctx: FamilyContext, itemId: string, meta: ActorMeta) {
+/**
+ * 彻底删除：只删数据库行。磁盘文件按 sha256 内容寻址，可能被其他条目或
+ * 重复上传的媒体记录共享，因此这里绝不直接删盘——由 storage_gc 任务重算
+ * 引用后统一回收。为避免等到每日维护，调用方会随后入队一次 storage_gc。
+ */
+export async function purgeItem(userId: string, ctx: FamilyContext, itemId: string, meta: ActorMeta): Promise<void> {
   const item = await prisma.item.findFirst({ where: { id: itemId, familyId: ctx.familyId } });
   if (!item) throw notFound('条目不存在');
   if (item.status !== 'trashed') throw conflict('只有回收站中的条目才能彻底删除');
 
-  const media = await prisma.itemMedia.findMany({ where: { itemId } });
+  const mediaCount = await prisma.itemMedia.count({ where: { itemId } });
   await prisma.$transaction(async (tx) => {
+    // 媒体行随外键 onDelete: Cascade 一并删除；审计保留（合规与追溯需要）
     await tx.item.delete({ where: { id: itemId } });
     await audit.record(
       {
@@ -441,13 +446,12 @@ export async function purgeItem(userId: string, ctx: FamilyContext, itemId: stri
         action: 'item.purge',
         targetType: 'item',
         targetId: itemId,
-        diff: { title: item.title, mediaCount: media.length } as Prisma.InputJsonValue,
+        diff: { title: item.title, mediaCount } as Prisma.InputJsonValue,
         ...meta,
       },
       tx,
     );
   });
-  return media.flatMap((m) => [m.storageKey, m.thumbKey, m.largeKey, m.transcodeKey, m.waveformKey].filter(Boolean) as string[]);
 }
 
 export async function listTrash(ctx: FamilyContext, limit = 100) {

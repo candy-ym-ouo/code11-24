@@ -6,7 +6,7 @@ import type { ItemMedia } from '@prisma/client';
 import { prisma } from '../db';
 import { AppError, badRequest, notFound, conflict } from '../http/errors';
 import { config } from '../config';
-import { objectKey, exists, moveIntoPlace, remove, statObject, tmpDir } from '../storage/local';
+import { objectKey, exists, moveIntoPlace, statObject, tmpDir, touch } from '../storage/local';
 import { detectFileType, limitForKind } from '../media/sniff';
 import { toMediaDto } from '../serializers';
 import * as audit from './auditService';
@@ -27,7 +27,11 @@ async function sha256File(filePath: string): Promise<string> {
   });
 }
 
-async function enqueue(type: 'media_thumbnail' | 'media_waveform' | 'export_build', payload: object, familyId?: string) {
+async function enqueue(
+  type: 'media_thumbnail' | 'media_waveform' | 'export_build' | 'storage_gc' | 'trash_purge',
+  payload: object,
+  familyId?: string,
+) {
   await prisma.job.create({
     data: { type, payload: payload as never, familyId: familyId ?? null },
   });
@@ -63,6 +67,8 @@ export async function uploadMedia(
 
   if (await exists(key)) {
     await fsp.rm(file.path, { force: true }); // 内容寻址命中：同一份文件不重复占盘
+    // 复用的可能是一份很旧的文件；刷新 mtime，防止它在新记录引用后仍被 GC 的宽限判据误删。
+    await touch(key);
   } else {
     await moveIntoPlace(file.path, key);
   }
@@ -223,10 +229,6 @@ export { enqueue };
 
 export function makeTmpPath(ext: string): string {
   return path.join(tmpDir(), `proc-${Date.now()}-${Math.random().toString(36).slice(2, 10)}${ext}`);
-}
-
-export async function removeStoredKeys(keys: string[]): Promise<void> {
-  await Promise.all(keys.map((k) => remove(k).catch(() => undefined)));
 }
 
 export async function assertMediaBelongsToFamily(mediaId: string, familyId: string): Promise<ItemMedia> {

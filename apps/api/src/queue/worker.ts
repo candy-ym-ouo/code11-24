@@ -6,8 +6,9 @@ import { logger } from '../logger';
 import { processImage } from '../media/image';
 import { processAudio } from '../media/audio';
 import { inspectDocument } from '../media/document';
-import { putBuffer, remove } from '../storage/local';
+import { putBuffer } from '../storage/local';
 import { makeTmpPath } from '../services/mediaService';
+import { collectReferencedKeys, GC_GRACE_MS } from '../services/storageGcService';
 import { buildExportZip } from '../services/exportService';
 
 type Handler = (job: Job) => Promise<Record<string, unknown>>;
@@ -89,38 +90,46 @@ async function handleExport(job: Job): Promise<Record<string, unknown>> {
   return { items: result.items, media: result.media, bytes: result.bytes, file: result.file };
 }
 
-/** 回收站保留期到期后彻底删除（含磁盘文件）。 */
+/**
+ * 回收站保留期到期后彻底删除。
+ *
+ * 只删数据库行，不删磁盘文件：文件按 sha256 内容寻址，可能被其他条目
+ * （或同家庭中重复上传的媒体记录）共享。物理文件统一交给随后的
+ * storage_gc 任务按重算出的引用集合回收，删除一条记录不会连累共享文件的其他记录。
+ */
 async function handleTrashPurge(): Promise<Record<string, unknown>> {
   const cutoff = new Date(Date.now() - config.TRASH_RETENTION_DAYS * 86_400_000);
   const expired = await prisma.item.findMany({
     where: { status: 'trashed', deletedAt: { lt: cutoff } },
-    include: { media: true },
+    select: { id: true },
     take: 500,
   });
   let removed = 0;
   for (const item of expired) {
-    const keys = item.media.flatMap((m) => [m.storageKey, m.thumbKey, m.largeKey, m.transcodeKey, m.waveformKey]);
+    // 媒体行随外键 onDelete: Cascade 一并删除；磁盘文件由 storage_gc 回收
     await prisma.item.delete({ where: { id: item.id } });
-    await Promise.all(keys.filter(Boolean).map((k) => remove(k!).catch(() => undefined)));
     removed += 1;
   }
   return { removed, cutoff: cutoff.toISOString() };
 }
 
-/** 清理孤儿文件与过期导出包，防止磁盘只涨不降。 */
+/**
+ * 清理孤儿文件与过期导出包，防止磁盘只涨不降。
+ *
+ * 引用集合每次从数据库全量重算（见 storageGcService），不维护、也不依赖
+ * 任何引用计数列，因此可重复执行、对老数据与备份恢复的数据天然兼容：
+ * 同一份内容寻址文件只要还有任一存活记录引用就保留；无引用的文件
+ * 还要超过宽限期才删，避开并发上传/处理与备份窗口。
+ */
 async function handleStorageGc(): Promise<Record<string, unknown>> {
   const fsp = await import('node:fs/promises');
   const path = await import('node:path');
-  const referenced = new Set<string>();
-  const media = await prisma.itemMedia.findMany({ select: { storageKey: true, thumbKey: true, largeKey: true, transcodeKey: true, waveformKey: true } });
-  for (const m of media) {
-    for (const k of [m.storageKey, m.thumbKey, m.largeKey, m.transcodeKey, m.waveformKey]) if (k) referenced.add(k);
-  }
+  const referenced = await collectReferencedKeys();
 
   const root = config.STORAGE_ROOT;
   let scanned = 0;
   let deleted = 0;
-  const cutoff = Date.now() - 24 * 3600 * 1000;
+  const cutoff = Date.now() - GC_GRACE_MS;
 
   async function walk(dir: string): Promise<void> {
     let entries: Dirent[];
@@ -172,7 +181,7 @@ async function handleStorageGc(): Promise<Record<string, unknown>> {
     }
   }
 
-  return { scanned, deleted };
+  return { scanned, referenced: referenced.size, deleted };
 }
 
 const HANDLERS: Record<string, Handler> = {

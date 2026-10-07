@@ -93,6 +93,16 @@ export async function remove(key: string): Promise<void> {
   await fsp.rm(absOf(key), { force: true });
 }
 
+/**
+ * 更新文件 mtime 为当前时间。内容寻址命中（重复上传复用既有文件）时调用：
+ * 孤儿回收以 mtime 作为宽限判据，复用一份可能很旧的文件后必须“碰一下”，
+ * 避免它刚被新记录引用就被 GC 当成过期文件删掉。
+ */
+export async function touch(key: string): Promise<void> {
+  const now = new Date();
+  await fsp.utimes(absOf(key), now, now);
+}
+
 export async function readJson<T>(key: string): Promise<T | null> {
   try {
     return JSON.parse(await fsp.readFile(absOf(key), 'utf8')) as T;

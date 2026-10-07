@@ -18,7 +18,6 @@ import * as itemService from '../services/itemService';
 import * as noteService from '../services/noteService';
 import * as mediaService from '../services/mediaService';
 import { listTrash } from '../services/itemService';
-import { removeStoredKeys } from '../services/mediaService';
 
 export const itemsRouter = Router({ mergeParams: true });
 
@@ -101,8 +100,9 @@ itemsRouter.delete(
   asyncHandler(async (req, res) => {
     const user = currentUser(req);
     const ctx = familyCtx(req);
-    const keys = await itemService.purgeItem(user.id, ctx, req.params.itemId!, clientMeta(req));
-    await removeStoredKeys(keys);
+    await itemService.purgeItem(user.id, ctx, req.params.itemId!, clientMeta(req));
+    // 文件不在这里删（可能与其他条目共享内容寻址存储）；让 GC 重算引用后回收。
+    await mediaService.enqueue('storage_gc', {});
     res.status(204).end();
   }),
 );
